@@ -14,6 +14,7 @@ async function go() {
     iss: 'OpenBanking',
 //    sub: '0015800001041RHAAY',
     sub: 'b',
+    aud: 'aud',
     validity: 30,
     customClaims: {
       alpha: '10',
