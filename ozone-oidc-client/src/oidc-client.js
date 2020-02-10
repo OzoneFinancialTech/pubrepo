@@ -67,6 +67,7 @@ class OidcClient {
     fields.grant_type = grantType;
     fields.scope = scope;
 
+
     // start building up the request params
     const params = {
       verb: 'post',
@@ -86,7 +87,49 @@ class OidcClient {
     }
 
     // add in whatever is required for authentication
-    await this._addAuthenticationParams(params);
+    await this._addAuthenticationParams(params, grantType);
+
+    // make the call
+    const response = await Http.do(params);
+    if (response.json !== undefined) {
+      return response.json;
+    }
+
+    throw new Error(`failed to get access token ${response.data}`);
+  }
+
+  async _getReauthAccessToken(scope, grantType, intentID, fields) {
+    // ensure we have the .well-known
+    await this.getWellKnownConfiguration();
+
+    if (fields === undefined) {
+      fields = {};
+    }
+    fields.grant_type = grantType;
+    fields.scope = scope;
+
+    
+
+    // start building up the request params
+    const params = {
+      verb: 'post',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded'
+      },
+      fields,
+      certs: this.clientConfig.certs,
+      parseJson: true,
+      logLevel: this.httpLogLevel
+    };
+
+    // get the token endpoint
+    params.url = this.wellKnownConfiguration.token_endpoint;
+    if (params.url === undefined) {
+      throw new Error('token_endpoint not defined in oidc well-known configuration');
+    }
+
+    // add in whatever is required for authentication
+    await this._addAuthenticationParams(params, grantType, intentID);
 
     // make the call
     const response = await Http.do(params);
@@ -99,6 +142,10 @@ class OidcClient {
 
   async getTokenByClientCredentialsGrant(scope) {
     return this._getAccessToken(scope, 'client_credentials');
+  }
+
+  async getTokenByJWTGrant(scope, intentID) {
+    return this._getReauthAccessToken(scope, 'urn:ietf:params:oauth:grant-type:jwt-bearer', intentID);
   }
 
   async getTokenByCibaGrant(scope, authReqId) {
@@ -178,10 +225,12 @@ class OidcClient {
     throw new Error(`failed to call bc-authorize: ${response.data}`);
   }
 
-  async _addAuthenticationParams(params) {
+  async _addAuthenticationParams(params, grantType, intentID) {
     if (this.clientConfig.token_endpoint_auth_method === undefined) {
       throw new Error('token_endpoint_auth_method missing in client config');
     }
+
+
 
     switch (this.clientConfig.token_endpoint_auth_method) {
       case 'client_secret_basic':
@@ -189,7 +238,12 @@ class OidcClient {
         break;
 
       case 'private_key_jwt':
-        await this._addPrivateKeyJwtAuthenticationMethod(params);
+        if(grantType === "urn:ietf:params:oauth:grant-type:jwt-bearer"){
+          await this._addPrivateKeyJwtAuthenticationMethodForReauth(params, intentID);
+        }else{
+          await this._addPrivateKeyJwtAuthenticationMethod(params);
+        }
+        
         break;
       case 'tls_client_auth':
         await this._addTlsClientAuthAuthenticationMethod(params);
@@ -263,6 +317,48 @@ class OidcClient {
     // set other http params
     params.fields.client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'; // eslint-disable-line no-param-reassign
     params.fields.client_assertion = jws; // eslint-disable-line no-param-reassign
+  }
+
+  async _addPrivateKeyJwtAuthenticationMethodForReauth(params, intentID) {
+    if (this.clientConfig.token_endpoint_auth_signing_alg === undefined) {
+      throw new Error('token_endpoint_auth_signing_alg is missing in client config');
+    }
+
+    if ((this.clientConfig.token_endpoint_auth_signing_alg === 'none') ||
+      (this.clientConfig.token_endpoint_auth_signing_alg === 'HS256')) {
+      throw new Error('token_endpoint_auth_signing_alg cannot be HS256 or none for token_endpoint_auth_method private_key_jwt');
+    }
+
+    if (this.clientConfig.signingKeyKid === undefined) {
+      throw new Error('signingKeyKid is missing in client config');
+    }
+
+    if (this.clientConfig.signingKeyFileName === undefined) {
+      throw new Error('signingKeyFIleName is missing in client config');
+    }
+    
+
+    const iat = Date.now() / 1000;
+    const jwt = {
+      header: {
+        alg: this.clientConfig.token_endpoint_auth_signing_alg,
+        kid: this.clientConfig.signingKeyKid
+      },
+      body: {
+        iss: this.clientConfig.client_id,
+        sub: intentID,
+        aud: this.wellKnownConfiguration.token_endpoint,
+        jti: uuidv4(),
+        exp: iat + 30,
+        iat
+      },
+      signingKeyFileName: this.clientConfig.signingKeyFileName
+    };
+
+    const jws = await Jwt.sign(jwt);
+
+    // set other http params
+    params.fields.assertion = jws; // eslint-disable-line no-param-reassign
   }
 }
 
